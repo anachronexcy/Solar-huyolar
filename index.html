@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solar System RT — Kepler + Axial Tilt</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ddd; overflow: hidden; }
+    #info {
+      position: absolute; top: 10px; left: 10px; z-index: 5;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.35;
+      background: rgba(0,0,0,0.45); padding: 10px 12px; border-radius: 8px; backdrop-filter: blur(4px);
+    }
+    #credit { opacity: 0.8; }
+    .label { color: #fff; font-size: 12px; font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+    .gui-wrap { position: absolute; top: 10px; right: 10px; z-index: 10; }
+    a, a:visited { color: #8cd7ff; }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <div><strong>Solar System RT</strong> — эллиптические орбиты (Кеплер), наклоны осей и суточное вращение.</div>
+    <div>Управление: мышь — вращение/зум, ПКМ — пан, GUI справа — скорость времени/пауза/подписи/орбиты/радиусы.</div>
+    <div id="simtime"></div>
+    <div id="credit">by ChatGPT • three.js</div>
+  </div>
+  <div class="gui-wrap"></div>
+
+  <!-- Three.js & helpers (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/renderers/CSS2DRenderer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19/dist/lil-gui.umd.min.js"></script>
+
+  <script>
+  (() => {
+    const AU = 10.0; // scene units per 1 AU (scale of distances)
+
+    // Approximate planetary data
+    // a [AU], e, P [days], i [deg], axialTilt [deg], dayPeriod [days] (negative = retrograde)
+    const PLANETS = [
+      { name: "Mercury", color: 0xaaaaaa, a: 0.3871, e: 0.2056, P: 87.969,  i: 7.00,  axialTilt: 0.034, dayPeriod: 58.646,  visibleRadius: 0.35, realRadius_km: 2440 },
+      { name: "Venus",   color: 0xffe0a6, a: 0.7233, e: 0.0068, P: 224.701, i: 3.39,  axialTilt: 177.36, dayPeriod: -243.025, visibleRadius: 0.85, realRadius_km: 6052 },
+      { name: "Earth",   color: 0x88aaff, a: 1.0000, e: 0.0167, P: 365.256, i: 0.00,  axialTilt: 23.44, dayPeriod: 0.99727,    visibleRadius: 0.9,  realRadius_km: 6371 },
+      { name: "Mars",    color: 0xff6b4a, a: 1.5237, e: 0.0934, P: 686.980, i: 1.85,  axialTilt: 25.19, dayPeriod: 1.02596,   visibleRadius: 0.6,  realRadius_km: 3390 },
+      { name: "Jupiter", color: 0xf0d7a8, a: 5.2028, e: 0.0489, P: 4332.59, i: 1.30,  axialTilt: 3.13,  dayPeriod: 0.41354,   visibleRadius: 3.0,  realRadius_km: 69911 },
+      { name: "Saturn",  color: 0xffe6b3, a: 9.5388, e: 0.0565, P: 10759.2, i: 2.49,  axialTilt: 26.73, dayPeriod: 0.44401,   visibleRadius: 2.5,  realRadius_km: 58232 },
+      { name: "Uranus",  color: 0xa4f1ff, a: 19.191, e: 0.0457, P: 30685.4, i: 0.77,  axialTilt: 97.77, dayPeriod: -0.71833,  visibleRadius: 1.8,  realRadius_km: 25362 },
+      { name: "Neptune", color: 0x7fb2ff, a: 30.061, e: 0.0113, P: 60189.0, i: 1.77,  axialTilt: 28.32, dayPeriod: 0.67125,   visibleRadius: 1.7,  realRadius_km: 24622 },
+    ];
+
+    // Size scaling for "realistic" mode (exaggerated down to be visible)
+    // We'll convert km to scene units: choose factor so Earth radius ~ 0.1 units (still visible)
+    const KM_TO_UNITS = 1.0 / 70000.0; // 70,000 km -> 1 unit => Earth ~0.09 units
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const labelRenderer = new THREE.CSS2DRenderer();
+    labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    labelRenderer.domElement.style.position = 'absolute';
+    labelRenderer.domElement.style.top = '0';
+    labelRenderer.domElement.style.pointerEvents = 'none';
+    document.body.appendChild(labelRenderer.domElement);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1e6);
+    camera.position.set(0, 80, 220);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    // Lights
+    const sunLight = new THREE.PointLight(0xffffff, 2.0, 0, 2);
+    scene.add(sunLight);
+
+    // Sun (emissive)
+    const sunGeo = new THREE.SphereGeometry(5.0, 64, 64);
+    const sunMat = new THREE.MeshBasicMaterial({ color: 0xffcc66 });
+    const sun = new THREE.Mesh(sunGeo, sunMat);
+    scene.add(sun);
+
+    // Ecliptic grid (subtle)
+    const grid = new THREE.GridHelper(1200, 60, 0x113344, 0x113344);
+    grid.rotation.x = Math.PI / 2;
+    grid.material.opacity = 0.15;
+    grid.material.transparent = true;
+    scene.add(grid);
+
+    // Orbits + planets
+    const planetObjs = [];
+
+    function makeOrbitCurve(aAU, e, segments = 512) {
+      const a = aAU * AU;
+      const curvePts = [];
+      for (let j = 0; j < segments; j++) {
+        const nu = (j / segments) * Math.PI * 2; // true anomaly
+        const r = (a) * (1 - e*e) / (1 + e * Math.cos(nu));
+        // Draw in XZ-plane (Y up). Place ellipse center at origin, perihelion on +X
+        const x = r * Math.cos(nu);
+        const z = r * Math.sin(nu);
+        curvePts.push(new THREE.Vector3(x, 0, z));
+      }
+      const geom = new THREE.BufferGeometry().setFromPoints(curvePts);
+      const mat = new THREE.LineBasicMaterial({ color: 0x224455, transparent: true, opacity: 0.7 });
+      return new THREE.LineLoop(geom, mat);
+    }
+
+    // Kepler solver: returns {r, nu}
+    function kepler(e, M) {
+      // Normalize M to [-pi, pi]
+      M = ((M + Math.PI) % (2 * Math.PI)) - Math.PI;
+      let E = (e < 0.8) ? M : Math.PI; // initial guess
+      for (let k = 0; k < 12; k++) {
+        const f = E - e * Math.sin(E) - M;
+        const fp = 1 - e * Math.cos(E);
+        const dE = -f / fp;
+        E += dE;
+        if (Math.abs(dE) < 1e-8) break;
+      }
+      const cosE = Math.cos(E), sinE = Math.sin(E);
+      const sqrt1_e2 = Math.sqrt(1 - e*e);
+      const nu = 2 * Math.atan2(sqrt1_e2 * sinE, (cosE - e));
+      const r = (1 - e * cosE); // in units of "a" (semi-major axis)
+      return { r, nu };
+    }
+
+    // Build planets
+    PLANETS.forEach((p, idx) => {
+      const group = new THREE.Group();
+      scene.add(group);
+
+      // Orbit path
+      const orbit = makeOrbitCurve(p.a, p.e);
+      group.add(orbit);
+
+      // Inclination: rotate orbit group around X-axis by i
+      group.rotation.x = THREE.MathUtils.degToRad(p.i);
+
+      // Planet mesh
+      const sphereReal = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(0.03, p.realRadius_km * KM_TO_UNITS), 48, 48),
+        new THREE.MeshStandardMaterial({ color: p.color, roughness: 0.6, metalness: 0.0 })
+      );
+      const sphereVisible = new THREE.Mesh(
+        new THREE.SphereGeometry(p.visibleRadius, 48, 48),
+        new THREE.MeshStandardMaterial({ color: p.color, roughness: 0.6, metalness: 0.0 })
+      );
+
+      // Node to switch between real/visible
+      const planetSwitch = new THREE.Group();
+      planetSwitch.add(sphereVisible);
+      planetSwitch.add(sphereReal);
+      sphereReal.visible = false;
+      group.add(planetSwitch);
+
+      // Axial tilt (rotate the switch node around Z so that Y remains "up")
+      planetSwitch.rotation.z = THREE.MathUtils.degToRad(p.axialTilt);
+
+      // Label
+      const labelDiv = document.createElement('div');
+      labelDiv.className = 'label';
+      labelDiv.textContent = p.name;
+      const labelObj = new THREE.CSS2DObject(labelDiv);
+      labelObj.position.set(0, p.visibleRadius + 1.2, 0);
+      planetSwitch.add(labelObj);
+
+      planetObjs.push({
+        data: p,
+        group,
+        orbit,
+        switchNode: planetSwitch,
+        meshVisible: sphereVisible,
+        meshReal: sphereReal,
+        label: labelObj,
+        thetaSpin: 0 // rotation angle around own axis
+      });
+    });
+
+    // GUI
+    const gui = new lil.GUI({ container: document.querySelector('.gui-wrap') });
+    const settings = {
+      daysPerSecond: 1.0,       // simulation speed
+      paused: false,
+      showLabels: true,
+      showOrbits: true,
+      visibleRadii: true,
+      resetCamera: () => {
+        camera.position.set(0, 80, 220);
+        controls.target.set(0, 0, 0);
+        controls.update();
+      }
+    };
+    gui.add(settings, 'daysPerSecond', 0.0, 50.0, 0.1).name('Days/sec');
+    gui.add(settings, 'paused').name('Pause');
+    gui.add(settings, 'showLabels').name('Labels').onChange(v => {
+      planetObjs.forEach(o => { o.label.visible = v; });
+    });
+    gui.add(settings, 'showOrbits').name('Orbits').onChange(v => {
+      planetObjs.forEach(o => { o.orbit.visible = v; });
+      grid.visible = v;
+    });
+    gui.add(settings, 'visibleRadii').name('Visible radii').onChange(v => {
+      planetObjs.forEach(o => {
+        o.meshVisible.visible = v;
+        o.meshReal.visible = !v;
+        o.label.position.y = (v ? o.data.visibleRadius : Math.max(0.03, o.data.realRadius_km * KM_TO_UNITS)) + 1.2;
+      });
+    });
+    gui.add(settings, 'resetCamera').name('Reset camera');
+
+    // Animation state
+    let lastT = performance.now();
+    let simDays = 0.0;
+
+    function update(dtSec) {
+      if (!settings.paused) {
+        simDays += dtSec * settings.daysPerSecond;
+      }
+
+      // Update each planet
+      planetObjs.forEach(o => {
+        const { a, e, P, dayPeriod } = o.data;
+        const n = (2 * Math.PI) / P; // mean motion [rad/day]
+        const M = n * simDays;       // start M0 = 0 for simplicity
+        const sol = kepler(e, M);
+        const aUnits = a * AU;
+        const r = sol.r * aUnits; // since r was in units of "a"
+        const nu = sol.nu;
+
+        // Position in the planet's orbital plane (before inclination applied):
+        const x = r * Math.cos(nu);
+        const z = r * Math.sin(nu);
+
+        // Place planet in group's local space (group already rotated by inclination)
+        o.switchNode.position.set(x, 0, z);
+
+        // Spin around axis according to day length (radians per sim day)
+        if (dayPeriod !== 0) {
+          const spinDir = (dayPeriod > 0) ? 1 : -1;
+          const absPeriod = Math.abs(dayPeriod);
+          // angle increment per sim day:
+          const dThetaPerDay = spinDir * (2 * Math.PI / absPeriod);
+          if (!settings.paused) o.thetaSpin += dThetaPerDay * (dtSec * settings.daysPerSecond);
+          // rotate around local Y (after applying axial tilt)
+          o.switchNode.rotation.y = o.thetaSpin;
+        }
+      });
+
+      // Sun light follows Sun
+      sunLight.position.copy(sun.position);
+    }
+
+    // HUD time display
+    const simtimeDiv = document.getElementById('simtime');
+    function updateSimTimeHUD() {
+      // Show elapsed simulation time in days and years
+      const years = simDays / 365.25;
+      simtimeDiv.textContent = `Sim time: ${simDays.toFixed(2)} d  (~${years.toFixed(3)} yr)  •  Speed: ${settings.daysPerSecond.toFixed(2)} d/s`;
+    }
+
+    // Resize
+    function onResize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      labelRenderer.setSize(w, h);
+    }
+    window.addEventListener('resize', onResize);
+
+    // Main loop
+    function animate() {
+      const now = performance.now();
+      const dt = Math.max(0.001, (now - lastT) / 1000.0);
+      lastT = now;
+
+      update(dt);
+      updateSimTimeHUD();
+
+      controls.update();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+  })();
+  </script>
+</body>
+</html>
